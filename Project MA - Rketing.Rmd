@@ -1,0 +1,525 @@
+---
+title: "Term Deposit Subscription Prediction Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+The data is related with direct marketing campaigns of a Portuguese banking institution. The marketing campaigns were based on phone calls. Often, more than one contact to the same client was required, in order to access if the product (bank term deposit) would be ('yes') or not ('no') subscribed.
+
+
+
+```{r message=FALSE, warning=FALSE}
+require(ggplot2)
+require(dplyr)
+require(Hmisc)
+require(reshape)
+require(dummies)
+require(caret)
+require(ROCR)
+require(randomForest)
+require(caTools)
+require(rpart)
+require(rpart.plot)
+```
+
+## Dataset
+
+```{r message=FALSE}
+setwd('/Users/serhansuer/Desktop')
+data <- read.csv('bank-full.csv',sep=';')
+```
+
+```{r}
+dim(data)
+```
+
+```{r}
+head(data)
+```
+
+1. age (numeric)
+2. job : type of job (categorical: 'admin.','blue-collar','entrepreneur','housemaid','management','retired','self-employed','services','student','technician','unemployed','unknown')
+3. marital : marital status (categorical: 'divorced','married','single','unknown'; note: 'divorced' means divorced or widowed)
+4. education (categorical: 'basic.4y','basic.6y','basic.9y','high.school','illiterate','professional.course','university.degree','unknown')
+5. default: has credit in default? (categorical: 'no','yes','unknown')
+6. balance: amount of money in customer's account (numeric)
+7. housing: has housing loan? (categorical: 'no','yes','unknown')
+8. loan: has personal loan? (categorical: 'no','yes','unknown')
+9. contact: contact communication type (categorical: 'cellular','telephone')
+10. month: last contact month of year (categorical: 'jan', 'feb', 'mar', ..., 'nov', 'dec')
+11. day_of_week: last contact day of the week (categorical: 'mon','tue','wed','thu','fri')
+12. duration: last contact duration, in seconds (numeric).
+13. campaign: number of contacts performed during this campaign and for this client (numeric, includes last contact)
+14. pdays: number of days that passed by after the client was last contacted from a previous campaign (numeric; -1 means client was not previously contacted)
+15. previous: number of contacts performed before this campaign and for this client (numeric)
+16. poutcome: outcome of the previous marketing campaign (categorical: 'failure','nonexistent','success')
+17. y - has the client subscribed a term deposit? (binary: 'yes','no')
+
+## Exploratory Data Analysis
+
+```{r}
+glimpse(data)
+```
+
+```{r}
+describe(data)
+```
+
+```{r}
+str(data)
+```
+```{r}
+summary(data)
+```
+When we check the summary table, we can say that there could be outliers in "campaign" (number of calls), "previous" (number of contacts in previous campaigns) and "duration" (of call) variables. Also column "pdays" (time passed after last call) has value of 999 in some rows meaning the customer has not received a call before. And since we have categorical variables, we will need to dummify them and scale them to numeric variables.
+```{r}
+data_unq <- subset(data, select = -c(age, duration, balance, pdays))
+unq_vals <- lapply(data_unq, unique)
+unq_vals
+```
+
+
+```{r}
+target <- 'y'
+cat_vars <- c('job', 'marital', 'education', 'default', 'housing', 
+           'loan', 'contact', 'poutcome')
+
+num_vars <- c('age', 'balance', 'day', 'duration', 'campaign', 'pdays', 'previous')
+```
+
+```{r}
+for (i in cat_vars) {
+    print(i)
+    print(sort(table(data[i]), decreasing = TRUE))
+    cat("\n")
+}
+```
+
+```{r}
+y_customers <- data %>%
+  filter(y == "yes")
+y_ratio <- nrow(y_customers) / nrow(data)
+y_ratio
+```
+
+Nearly 11.7% of our target value is yes which means 11.7% of all customers subscribed for term deposit.
+
+```{r}
+monthly_results <- data %>% 
+    group_by(month) %>% 
+    summarise(yes=sum(y=="yes"), no= sum(y=="no"),perc=yes/(yes+no))%>%
+    arrange(month)
+monthly_results
+```
+It can be seen that month can affect the subscription result.
+
+```{r}
+data%>%
+  ggplot(aes(age))+
+  geom_histogram(aes(fill=y),binwidth = 5)
+```
+
+Age distribution is positively skewed and when yes/no distributions checked amongst different ages, it looks like it might be a good predictor. Also, grouping ages according to life cycle changes like for example graduation, early professional years, later professional years, before retirement, after retirement might be useful.
+
+```{r}
+data_job <-melt(data %>%
+                mutate(rcount=1) %>%
+                group_by(job,y) %>%
+                summarise(sum(rcount)),id=c("job","y"))
+
+jobsummary <- cast(data_job, job~y)
+jobsummary %>%
+    group_by(job) %>%
+    mutate(percentage=round(yes/(yes+no),2)) %>%
+    arrange(desc(percentage))
+```
+
+When we grouped data by job and checked percentage of subscriptions top 3 is, student, retired and unemployed which means both of them are not currently employed, followed by admin. and management. This might give a clue about grouping job.
+
+```{r}
+data_marital <- melt(data %>%
+                        mutate(rcount=1) %>%
+                        group_by(marital,y) %>%
+                        summarise(sum(rcount)),id=c("marital","y"))
+
+maritalsummary<- cast(data_marital, marital~y)
+maritalsummary %>%
+        group_by(marital) %>%
+        mutate(percentage=round(yes/(yes+no),2)) %>%
+        arrange(desc(percentage))
+```
+
+Subscription percentage of divorced and married customers are a little below the general average while single and unknown marital status customers subscription percentage is almost 3% higher then average.
+
+#### Visualizing the Distribution of the Variables
+
+```{r}
+data %>%
+    ggplot(aes(education)) +
+    geom_bar(aes(fill=y)) +
+    theme( axis.text.x = element_text(angle = 65,vjust = 0.5, hjust = 0.5, size = 12))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$job)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$marital)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$education)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$default)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$housing)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$loan)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$contact)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$poutcome)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$y)) +
+    geom_bar() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+data %>%
+    ggplot(aes(data$age)) +
+    geom_histogram(binwidth = 5) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+boxplot(data$age)
+```
+
+```{r}
+boxplot(data$balance)
+```
+
+```{r}
+plot(data$age, data$balance)
+```
+
+```{r}
+data %>%
+    ggplot(aes(x=job, fill=y))+
+    geom_bar(position="dodge2")+
+    guides(fill=guide_legend(title="Subscripted")) + 
+    theme( axis.text.x = element_text(angle = 65,vjust = 0.5, hjust = 0.5, size = 12))
+```
+
+```{r}
+data %>%
+    ggplot(aes(x=marital, fill=y))+
+    geom_bar(position="dodge2")+
+    guides(fill=guide_legend(title="Subscripted")) + 
+    theme( axis.text.x = element_text(angle = 65,vjust = 0.5, hjust = 0.5, size = 12))
+```
+
+```{r}
+data %>%
+    ggplot(aes(x=education, fill=y))+
+    geom_bar(position="dodge2")+
+    guides(fill=guide_legend(title="Subscripted")) + 
+    theme( axis.text.x = element_text(angle = 65,vjust = 0.5, hjust = 0.5, size = 12))
+```
+
+```{r}
+data %>%
+    ggplot(aes(x=default, fill=y))+
+    geom_bar(position="dodge2")+
+    guides(fill=guide_legend(title="Subscripted")) + 
+    theme( axis.text.x = element_text(angle = 65,vjust = 0.5, hjust = 0.5, size = 12))
+```
+
+```{r}
+data %>% 
+    group_by(job) %>% 
+    summarise(yes=sum(y=="yes"), no= sum(y=="no"),
+              yes_pct=round(yes*100/(yes+no),2), 
+              no_pct=round(no*100/(yes+no),2))%>%
+    arrange(job) %>%
+    select(-yes, -no)
+```
+
+```{r}
+groups <- c(quo(job), quo(marital), quo(education), quo(default), 
+            quo(housing), quo(loan), quo(contact), quo(poutcome))
+
+for (i in seq_along(groups)) {
+  data %>% 
+    group_by(!!groups[[i]]) %>%
+    summarise(yes=sum(y=="yes"), no= sum(y=="no"),
+              yes_pct=round(yes*100/(yes+no),2), 
+              no_pct=round(no*100/(yes+no),2))%>%
+    arrange(!!groups[[i]]) %>%
+    select(-yes, -no) %>%
+    print()
+    cat('\n')
+}
+```
+We decided to remove the "day" and "pdays" columns as they are irrelevant for the analysis.
+
+```{r}
+data = data %>%
+    select(-day, -pdays)
+```
+
+```{r}
+data %>%
+    ggplot(aes(previous)) +
+    geom_bar()
+```
+
+```{r}
+data %>%
+    filter(previous < 5) %>%
+    ggplot(aes(previous)) +
+    geom_bar()
+```
+Since 82% of all observations in "previous" column are zero, we decided to convert it to binary which translates to 0: not contacted before and 1: contacted before.
+
+```{r}
+data = data %>%
+    mutate(previous = ifelse(previous == 0, 0, 1))
+data$previous = as.integer(data$previous)
+```
+
+```{r}
+num_vars <- c('age', 'balance', 'duration', 'campaign')
+```
+
+Outliers in the dataset were detected based on IQR rule.
+
+```{r}
+Outliers <- c()
+
+for(i in num_vars){
+ 
+  max <- quantile(data[,i],0.75, na.rm=TRUE) + (IQR(data[,i], na.rm=TRUE) * 3 )
+  min <- quantile(data[,i],0.25, na.rm=TRUE) - (IQR(data[,i], na.rm=TRUE) * 3 )
+  
+  idx <- which(data[,i] < min | data[,i] > max)
+  
+  print(paste(i, length(idx), sep=' : '))
+  
+  Outliers <- c(Outliers, idx) 
+}
+ 
+Outliers <- sort(Outliers)
+
+data <- data[-Outliers,]
+```
+
+Target variable "y" and other binary variables were transformed into numerical type.
+
+```{r}
+data$y <- as.integer(as.character(factor(data$y, levels = c("no", "yes"), labels = c("0", "1"))))
+```
+
+```{r}
+data$default <- as.integer(as.character(factor(data$default, levels = c("no", "yes"), labels = c("0", "1"))))
+data$housing <- as.integer(as.character(factor(data$housing, levels = c("no", "yes"), labels = c("0", "1"))))
+data$loan <- as.integer(as.character(factor(data$loan, levels = c("no", "yes"), labels = c("0", "1"))))
+```
+
+```{r}
+multi = c('job', 'marital', 'education', 'contact', 'poutcome', 'month')
+```
+
+Categorical variables that have more than two distinct values were dummified in order to do a more precise analysis.
+
+```{r}
+data = dummy.data.frame(data, multi, drop = FALSE)
+```
+
+Numerical variables were scaled.
+
+```{r}
+data$age = scale(data$age)
+data$balance = scale(data$balance)
+data$duration = scale(data$duration)
+data$campaign = scale(data$campaign)
+```
+
+```{r}
+str(data)
+```
+
+
+## Marketing Analytics Applications
+
+
+### Train-Test Split
+```{r}
+smp_size <- floor(0.75 * nrow(data))
+set.seed(123)
+train_ind <- sample(seq_len(nrow(data)), size = smp_size)
+train <- data[train_ind, ]
+test <- data[-train_ind, ]
+```
+
+
+### Logistic Regression
+
+-Fitting the model-
+```{r}
+model <- glm(y ~ ., data = train, family = binomial)
+```
+
+```{r}
+summary(model)
+```
+
+Since columns maritalsingle, monthsep, jobunknown, educationunknown, contactunknown and poutcomeunknown are highly correlated, the output related to these columns happened to be NA.
+
+```{r}
+model <- glm(y ~ .-maritalsingle -monthsep -jobunknown -educationunknown -contactunknown -poutcomeunknown, 
+               data = train, family = binomial)
+```
+
+```{r}
+summary(model)
+```
+
+We have checked the result again and we have excluded the variables that have p-value greater than 0.05 to apply the model again.
+
+```{r}
+model <- glm(y ~ jobstudent + maritalmarried + educationprimary + balance + housing + loan + contactcellular + 
+               contacttelephone + monthapr + monthaug + monthfeb + monthjan + monthjul + monthjun + monthmar + 
+               monthmay + monthnov + duration + campaign, 
+               data = train, family = binomial)
+```
+
+```{r}
+summary(model)
+```
+
+It can be understood that contactcellular, contacttelephone and duration are the variables which have greater affect on subscription.
+
+```{r}
+predicttrains <- predict(model, train[-47], type = 'response')
+predictions <- predict(model, test[-47], type = 'response')
+```
+
+Then we've looked at the performance metrics of the model.
+
+```{r}
+predicted.classes <- ifelse(predicttrains > 0.5, "1", "0")
+predicted.classes.test <- ifelse(predictions > 0.5, "1", "0")
+```
+
+```{r}
+mean(predicted.classes == train$y)
+mean(predicted.classes.test == test$y)
+```
+
+```{r}
+train$y = factor(train$y)
+test$y = factor(test$y)
+```
+
+```{r}
+pred = prediction(predicttrains, train$y)
+perf = performance(pred, measure = "tpr", x.measure = "fpr")
+plot(perf)
+```
+
+Confusion Matrix and Statistics:
+```{r}
+train_cm <- factor(predicted.classes, levels = levels(as.factor(train[["y"]])))
+confusionMatrix(train_cm, as.factor(train[["y"]]))
+```
+
+```{r}
+test_cm <- factor(predicted.classes.test, levels = levels(as.factor(test[["y"]])))
+confusionMatrix(test_cm, as.factor(test[["y"]]))
+```
+
+Accuracy score of the model is 0.903. While Sensitivity is 0.979, Specificity is 0.265.
+
+
+
+### Decision Tree
+
+For better analysis, complexity parameter was selected as 0.003.
+
+```{r}
+fit <- rpart(train$y ~ ., data = train, method="class", control = rpart.control(cp = 0.003))
+```
+
+
+```{r}
+summary(fit)
+```
+
+It can be understood that 'duration' and 'poutcomesuccess' have the highest variable importance percentages. The longer the last contact duration is, the higher the probability of customer subscripting for the term deposit. Similarly, success of the previous marketing campaign has a significant effect on subscription.
+
+```{r}
+predicted_train = predict(fit, train[-47], type = "class")
+predicted_test = predict(fit, test[-47], type = "class")
+```
+
+Confusion Matrix:
+```{r}
+table = table(test$y, predicted_test)
+table
+```
+
+```{r}
+accuracy = sum(diag(table)) / sum(table)
+accuracy
+```
+
+Accuracy score of the decision tree model is 0.91.
+
+The visualization of the decision tree as below:
+```{r}
+rpart.plot(fit, extra=106)
+```
